@@ -11,6 +11,7 @@ import numpy as np
 from scipy.integrate import simpson as simp
 import matplotlib.cm as cm
 from cycler import cycler
+from scipy.signal import savgol_filter
 
 def model(peaks:dict, amps=None, a_bound=1, c_bound=0.4, sigma=None, a_scale=None, bkg=True):
     """
@@ -19,6 +20,7 @@ def model(peaks:dict, amps=None, a_bound=1, c_bound=0.4, sigma=None, a_scale=Non
     ----------
     peaks : dict
         Provide in format:
+            CASE I
             peaks = {'comp':{'type'  : 'lorentz' or 'gauss'
                              'center': (VALUE,VARY,MIN,MAX,EXPR,BRUTE_STEP),
                              'amp'   : (),
@@ -26,26 +28,27 @@ def model(peaks:dict, amps=None, a_bound=1, c_bound=0.4, sigma=None, a_scale=Non
                             }
                     }
         OR
+        CASE II
             peaks={'comp':{'centers':[1.5,4.2],
                    'type'='gauss'}
                   }                          
     amps : TYPE, optional
-        DESCRIPTION. The default is None.
+        CASE II. Initial amplitudes for all peaks. The default is None.
     a_bound : TYPE, optional
-        DESCRIPTION. The default is 1.
+        CASE II. Initial amplitude plus/minus range for all peaks. The default is 1.
     c_bound : TYPE, optional
-        DESCRIPTION. The default is 0.4.
+        CASE II. Initial centre plus/minus range for all peaks. The default is 0.4.
     sigma : TYPE, optional
-        DESCRIPTION. The default is None.
+        CASE II. Initial sigma value for all peaks. The default is None.
     a_scale : TYPE, optional
-        DESCRIPTION. The default is None.
+        CASE II. Initial amplitude scale for all peaks. The default is None.
 
     Returns
     -------
-    mod : TYPE
-        DESCRIPTION.
-    params : TYPE
-        DESCRIPTION.
+    mod : lmfit.model.CompositeModel
+        lmfit model object.
+    params : lmfit.parameter.Parameters
+        lmfit parameters object.
 
     """
     mod=None
@@ -123,6 +126,55 @@ def model(peaks:dict, amps=None, a_bound=1, c_bound=0.4, sigma=None, a_scale=Non
             mod += m[comp]
     return mod, params
 
+def mod1(peaks:dict, bkg=None, knot_vals=None, x=None, y=None):
+    mod=None
+    m = {}
+    params=Parameters()
+    for comp in peaks:
+        if 'type' not in peaks[comp].keys():
+            peaks[comp]['type']='gauss'
+        name = comp
+        if peaks[comp]['type']=='gauss':
+            m[name] = models.GaussianModel(prefix=f'{name}_')
+        elif peaks[comp]['type']=='lorentz':
+            m[name] = models.LorentzianModel(prefix=f'{name}_')
+        
+        for k in peaks[comp]:
+            if k == 'type':
+                continue
+            elif k == 'amp':
+                kname = 'amplitude'
+            else:
+                kname=k
+                
+            i=len(peaks[comp][k])
+            while i<6:
+                peaks[comp][k]+=(None,)
+                i+=1
+                
+            params.add_many((f'{name}_{kname}',)+peaks[comp][k])
+            if 'sigma' not in peaks[comp]:
+                params.add_many((f'{name}_sigma',)+(2, True, 0.001,100,None,None))
+    if bkg:
+        comp = 'bkg'
+        m[comp] = models.LinearModel(prefix='bkg_')
+        params.update(m[comp].make_params(bkg_slope=0.00001, bkg_intercept=-0.01))
+    for comp in m:
+        if mod is None:
+            mod = m[comp]
+        else:
+            mod += m[comp]
+    #if knot_vals is not None:
+    #    mod += models.SplineModel(xknots=knot_vals, prefix='bkg_')
+    #    params.update(mod.components[-1].guess(savgol_filter(y, 50, 1), x))
+    #    for k in list(params.keys()):
+    #        if 'bkg_' in k:
+    #            params[k].vary=False
+    #    params.update(mod.components[-1].guess(savgol_filter(y, 50, 1), x))
+    #plt.plot(x,y)
+    
+    return mod, params
+
 def fit(x,y, model, params, xlim=[0,7], norm=True):
     """
     Using lmfit model and parameters objects, fit x, y series of data.
@@ -140,7 +192,7 @@ def fit(x,y, model, params, xlim=[0,7], norm=True):
     xlim : list, optional
         DESCRIPTION. The default is [0,7].
     norm : bool, optional
-        Wether to normalise data before fitting. The default is True.
+        Whether to normalise data before fitting. The default is True.
 
     Returns
     -------
@@ -151,22 +203,26 @@ def fit(x,y, model, params, xlim=[0,7], norm=True):
     if type(xlim) is list and len(xlim)==2:
         rows = np.where((x>=xlim[0])&(x<=xlim[1]))[0]
     else:
-        rows = np.arange(0,len(x),1)
+        rows = np.indices(x.shape)[0]
     if norm is True:
         y = (y-np.min(y[rows]))/(np.max(y[rows])-np.min(y[rows]))
     result = model.fit(y[rows], params, x=x[rows])
     return result
 
-def plot_result(result, x, y, xlim=[0,7], norm=True, y_label=False, init_fit=False, leg_loc=None, title=None, show=True, colors=None, alpha=0.3):
+def plot_result(result, x, y, tech='sehi', xlim=None, norm=True, leg=True,
+                y_label=False, init_fit=False, leg_loc=None,
+                title=None, show=True, colors=None, alpha=0.3, groups=None):
+    if xlim is None and tech=='sehi':
+        xlim=[0,7]
     if type(xlim) is list and len(xlim)==2:
         rows = np.where((x>=xlim[0])&(x<=xlim[1]))[0]
     else:
-        rows = np.arange(0,len(x),1)
+        rows = np.indices(x.shape)[0]
     comps = result.eval_components(x=x[rows])
     #dely = result.eval_uncertainty(sigma=3)
     if norm is True:
         y = (y-np.min(y[rows]))/(np.max(y[rows])-np.min(y[rows]))
-    plt.scatter(x[rows], y[rows], s=8, c='#99002299', edgecolor='none', alpha=0.8, label='data')
+    plt.scatter(x[rows], y[rows], s=8, c='#99002299', edgecolor='none', label='data',zorder=-1)
     plt.plot(x[rows], result.best_fit, '-', label=f'best fit\n$R^2$={round(result.rsquared,3)}', color='k')
     if init_fit:
         plt.plot(x[rows], result.init_fit, '--', label='initial fit')
@@ -199,13 +255,22 @@ def plot_result(result, x, y, xlim=[0,7], norm=True, y_label=False, init_fit=Fal
                             comps[comp] + background,
                             color = c, alpha = alpha,
                             label = lab)
-    plt.xlabel('Raman shift [$cm^{-1}$]')
-    plt.ylabel('Raman intensity [arb.u.]')
+    plt.rcParams['mathtext.fontset'] = 'custom'
+    plt.rcParams['mathtext.it'] = 'sans:italic:bold'
+    plt.rcParams['mathtext.bf'] = 'sans:bold'
+    if tech == 'Raman':
+        plt.xlabel('Raman shift [$cm^{-1}$]',weight='bold')
+        plt.ylabel('Raman intensity [arb.u.]',weight='bold')
+    else:
+        
+        plt.xlabel('Electron energy, $\mathit{E}$ [eV]',weight='bold')
+        plt.ylabel('Emission intensity [arb.u.]',weight='bold')
     if title is not None:
         plt.title(title)
     else:
         plt.title('data, best-fit, and fit components')
-    plt.legend(bbox_to_anchor=leg_loc)
+    if leg:
+        plt.legend(bbox_to_anchor=leg_loc)
     if y_label is False:    
         plt.gca().yaxis.set_tick_params(labelleft=False)
         plt.gca().set_yticks([])
@@ -220,6 +285,7 @@ def print_result(result, tab=True):
     comps = list(set(comps))
     comps.sort()
     pts = result.eval_components()
+    res_d={}
     if tab:
         print('\tcenter\tamp\tsigma\theight\tFWHM\tArea')#\tType')
     for i,comp in enumerate(comps):
@@ -235,3 +301,11 @@ def print_result(result, tab=True):
             #mod = result.components[i]._name # doesn't work
             if tab:
                 print(f'{comp}\t{round(cen,2)}\t{round(amp,2)}\t{round(sig,2)}\t{round(heig,2)}\t{round(fwhm,2)}\t{round(area,2)}')#\t{mod}')
+            res_d[comp]={}
+            res_d[comp]['amp'] = amp
+            res_d[comp]['cen'] = cen
+            res_d[comp]['sig'] = sig
+            res_d[comp]['heig']= heig
+            res_d[comp]['fwhm']= fwhm
+            res_d[comp]['area']= area
+    return res_d
